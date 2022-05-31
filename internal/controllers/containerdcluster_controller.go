@@ -14,14 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package controllers implements controller functionality.
 package controllers
 
 import (
 	"context"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/cluster-api/test/infrastructure/container"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	infrastructurev1alpha3 "github.com/raminenia/cluster-api-provider-containerd/api/v1alpha3"
@@ -30,7 +33,8 @@ import (
 // ContainerdClusterReconciler reconciles a ContainerdCluster object
 type ContainerdClusterReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	ContainerRuntime container.Runtime
+	Scheme           *runtime.Scheme
 }
 
 //+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=containerdclusters,verbs=get;list;watch;create;update;patch;delete
@@ -55,7 +59,7 @@ func (r *ContainerdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *ContainerdClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *ContainerdClusterReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, options controller.Options) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infrastructurev1alpha3.ContainerdCluster{}).
 		Complete(r)

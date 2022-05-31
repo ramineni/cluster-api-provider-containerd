@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
@@ -28,10 +29,12 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	infrastructurev1alpha3 "github.com/raminenia/cluster-api-provider-containerd/api/v1alpha3"
+	capc "github.com/raminenia/cluster-api-provider-containerd/container"
 	"github.com/raminenia/cluster-api-provider-containerd/controllers"
 	//+kubebuilder:scaffold:imports
 )
@@ -46,6 +49,7 @@ func init() {
 
 	utilruntime.Must(infrastructurev1alpha3.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
+
 }
 
 func main() {
@@ -77,21 +81,9 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
-
-	if err = (&controllers.ContainerdClusterReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "ContainerdCluster")
-		os.Exit(1)
-	}
-	if err = (&controllers.ContainerdMachineReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "ContainerdMachine")
-		os.Exit(1)
-	}
+	// Setup the context that's going to be used in controllers and for the manager.
+	ctx := ctrl.SetupSignalHandler()
+	setupReconcilers(ctx, mgr)
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -106,6 +98,33 @@ func main() {
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
+		os.Exit(1)
+	}
+}
+
+func setupReconcilers(ctx context.Context, mgr ctrl.Manager) {
+	// Set our runtime client into the context for later use
+	runtimeClient, err := capc.NewContainerdClient("/var/run/containerd/containerd.sock", "default")
+	if err != nil {
+		setupLog.Error(err, "unable to establish container runtime connection", "controller", "reconciler")
+		os.Exit(1)
+	}
+
+	if err := (&controllers.ContainerdMachineReconciler{
+		Client:           mgr.GetClient(),
+		ContainerRuntime: runtimeClient,
+	}).SetupWithManager(ctx, mgr, controller.Options{
+		//MaxConcurrentReconciles: concurrency,
+	}); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DockerMachine")
+		os.Exit(1)
+	}
+
+	if err := (&controllers.ContainerdClusterReconciler{
+		Client:           mgr.GetClient(),
+		ContainerRuntime: runtimeClient,
+	}).SetupWithManager(ctx, mgr, controller.Options{}); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DockerCluster")
 		os.Exit(1)
 	}
 }
