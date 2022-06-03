@@ -18,11 +18,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/containerd/containerd"
-	//"github.com/containerd/containerd/namespaces"
+	"github.com/containerd/containerd/images/archive"
 	"github.com/containerd/containerd/namespaces"
 	refdocker "github.com/containerd/containerd/reference/docker"
+	"github.com/containerd/nerdctl/pkg/platformutil"
+	"github.com/containerd/nerdctl/pkg/referenceutil"
 
 	"sigs.k8s.io/cluster-api/test/infrastructure/container"
 )
@@ -42,7 +45,30 @@ func NewContainerdClient(socketPath string, namespace string) (container.Runtime
 }
 
 func (c *containerdRuntime) SaveContainerImage(ctx context.Context, image, dest string) error {
-	return fmt.Errorf("not implemented")
+	var saveOpts = []archive.ExportOpt{}
+
+	tar, err := os.Create(dest) //nolint:gosec // No security issue: dest is safe.
+	if err != nil {
+		return fmt.Errorf("failed to create destination file %q: %v", dest, err)
+	}
+	defer tar.Close()
+
+	platform := []string{"amd64"}
+	platMC, err := platformutil.NewMatchComparer(false, platform)
+	if err != nil {
+		return err
+	}
+
+	saveOpts = append(saveOpts, archive.WithPlatform(platMC))
+
+	imageStore := c.client.ImageService()
+	named, err := referenceutil.ParseAny(image)
+	if err != nil {
+		return err
+	}
+
+	saveOpts = append(saveOpts, archive.WithImage(imageStore, named.String()))
+	return c.client.Export(ctx, tar, saveOpts...)
 }
 
 func (c *containerdRuntime) PullContainerImageIfNotExists(ctx context.Context, image string) error {
