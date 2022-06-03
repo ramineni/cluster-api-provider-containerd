@@ -20,12 +20,15 @@ import (
 	"io"
 
 	"github.com/containerd/containerd"
-	//"github.com/containerd/containerd/namespaces"
+	"github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/namespaces"
 	refdocker "github.com/containerd/containerd/reference/docker"
+	sysignal "github.com/moby/sys/signal"
 
 	"sigs.k8s.io/cluster-api/test/infrastructure/container"
 )
+
+const defaultSignal = "SIGTERM"
 
 type containerdRuntime struct {
 	client    *containerd.Client
@@ -94,10 +97,61 @@ func (c *containerdRuntime) ContainerDebugInfo(ctx context.Context, containerNam
 	return fmt.Errorf("not implemented")
 }
 
+// DeleteContainer will remove a container.
 func (c *containerdRuntime) DeleteContainer(ctx context.Context, containerName string) error {
-	return fmt.Errorf("not implemented")
+	deleteOpts := []containerd.DeleteOpts{}
+	deleteOpts = append(deleteOpts, containerd.WithSnapshotCleanup) // delete volumes
+	container, err := c.client.LoadContainer(ctx, containerName)
+	if err != nil {
+		return err
+	}
+	task, err := container.Task(ctx, cio.Load)
+	if err != nil {
+		return container.Delete(ctx, deleteOpts...)
+	}
+	status, err := task.Status(ctx)
+	if err != nil {
+		return err
+	}
+	if status.Status == containerd.Stopped || status.Status == containerd.Created {
+		if _, err := task.Delete(ctx); err != nil {
+			return err
+		}
+		return container.Delete(ctx, deleteOpts...)
+	}
+	return fmt.Errorf("cannot delete a non stopped container: %v", status)
 }
 
+// KillContainer will kill all running tasks in a container with the specified signal.
 func (c *containerdRuntime) KillContainer(ctx context.Context, containerName, signal string) error {
-	return fmt.Errorf("not implemented")
+	sig, err := sysignal.ParseSignal(defaultSignal)
+	if err != nil {
+		return err
+	}
+	opts := []containerd.KillOpts{}
+	opts = append(opts, containerd.WithKillAll) // send signal to all processes inside the container
+	container, err := c.client.LoadContainer(ctx, containerName)
+	if err != nil {
+		return err
+	}
+	if signal != "" {
+		sig, err = sysignal.ParseSignal(signal)
+		if err != nil {
+			return err
+		}
+	} else {
+		sig, err = containerd.GetStopSignal(ctx, container, sig)
+		if err != nil {
+			return err
+		}
+	}
+	task, err := container.Task(ctx, nil)
+	if err != nil {
+		return err
+	}
+	// err = tasks.RemoveCniNetworkIfExist(ctx, container)
+	// if err != nil {
+	// 	return err
+	// }
+	return task.Kill(ctx, sig, opts...)
 }
