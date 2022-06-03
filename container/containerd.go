@@ -16,13 +16,19 @@ package container
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/namespaces"
 	refdocker "github.com/containerd/containerd/reference/docker"
+	gocni "github.com/containerd/go-cni"
+	"github.com/containerd/nerdctl/pkg/idutil/containerwalker"
+	"github.com/containerd/nerdctl/pkg/labels"
 	sysignal "github.com/moby/sys/signal"
 
 	"sigs.k8s.io/cluster-api/test/infrastructure/container"
@@ -74,7 +80,52 @@ func (c *containerdRuntime) PullContainerImageIfNotExists(ctx context.Context, i
 }
 
 func (c *containerdRuntime) GetHostPort(ctx context.Context, containerName, portAndProtocol string) (string, error) {
-	return "", fmt.Errorf("not implemented")
+	argPort := -1
+	argProto := ""
+	portProto := portAndProtocol
+	var err error
+
+	if portProto != "" {
+		splitBySlash := strings.Split(portProto, "/")
+		argPort, err = strconv.Atoi(splitBySlash[0])
+		if err != nil {
+			return "", err
+		}
+		if argPort <= 0 {
+			return "", fmt.Errorf("unexpected port %d", argPort)
+		}
+		switch len(splitBySlash) {
+		case 1:
+			argProto = "tcp"
+		case 2:
+			argProto = strings.ToLower(splitBySlash[1])
+		default:
+			return "", fmt.Errorf("failed to parse %q", portProto)
+		}
+	}
+
+	var port string
+	walker := &containerwalker.ContainerWalker{
+		Client: c.client,
+		OnFound: func(ctx context.Context, found containerwalker.Found) error {
+			if found.MatchCount > 1 {
+				return fmt.Errorf("ambiguous ID %q", found.Req)
+			}
+			port, err = printPort(ctx, found.Req, found.Container, argPort, argProto)
+			if err != nil {
+				return err
+			}
+			return nil
+		},
+	}
+
+	n, err := walker.Walk(ctx, containerName)
+	if err != nil {
+		return "", err
+	} else if n == 0 {
+		return "", fmt.Errorf("no such container %s", containerName)
+	}
+	return port, nil
 }
 
 func (c *containerdRuntime) GetContainerIPs(ctx context.Context, containerName string) (string, string, error) {
@@ -154,4 +205,26 @@ func (c *containerdRuntime) KillContainer(ctx context.Context, containerName, si
 	// 	return err
 	// }
 	return task.Kill(ctx, sig, opts...)
+}
+
+func printPort(ctx context.Context, containerName string, container containerd.Container, argPort int, argProto string) (string, error) {
+	l, err := container.Labels(ctx)
+	if err != nil {
+		return "", err
+	}
+	portsJSON := l[labels.Ports]
+	if portsJSON == "" {
+		return "", nil
+	}
+	var ports []gocni.PortMapping
+	if err := json.Unmarshal([]byte(portsJSON), &ports); err != nil {
+		return "", err
+	}
+	// Loop through the ports and return the first HostPort.
+	for _, p := range ports {
+		if p.ContainerPort == int32(argPort) && strings.ToLower(p.Protocol) == argProto {
+			return strconv.Itoa(int(p.HostPort)), nil
+		}
+	}
+	return "", fmt.Errorf("no host port found for load balancer %q", containerName)
 }
