@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"text/template"
@@ -34,6 +35,7 @@ import (
 	"github.com/containerd/nerdctl/pkg/idutil/containerwalker"
 	"github.com/containerd/nerdctl/pkg/inspecttypes/dockercompat"
 	"github.com/containerd/nerdctl/pkg/labels"
+	"github.com/containerd/nerdctl/pkg/logging/jsonfile"
 	"github.com/docker/cli/templates"
 	sysignal "github.com/moby/sys/signal"
 
@@ -174,8 +176,64 @@ func (c *containerdRuntime) ListContainers(ctx context.Context, filters containe
 	return nil, fmt.Errorf("not implemented")
 }
 
+// ContainerDebugInfo gets the container metadata and logs.
+// Currently, only containers created with `nerdctl run -d` are supported for log collection.
 func (c *containerdRuntime) ContainerDebugInfo(ctx context.Context, containerName string, w io.Writer) error {
-	return fmt.Errorf("not implemented")
+	f := &containerInspector{}
+	walker := containerwalker.ContainerWalker{
+		Client:  c.client,
+		OnFound: f.Handler,
+	}
+	n, err := walker.Walk(ctx, containerName)
+	if err != nil {
+		return err
+	} else if n == 0 {
+		return fmt.Errorf("no such object %s", containerName)
+	}
+
+	containerInfo, err := json.MarshalIndent(f.entries, "", "    ")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(w, "Inspected the container:")
+	fmt.Fprintf(w, "%+v\n", string(containerInfo))
+
+	// "1935db9" is from `$(echo -n "/run/containerd/containerd.sock" | sha256sum | cut -c1-8)``
+	// on Windows it will return "%PROGRAMFILES%/nerdctl/1935db59"
+	dataStore := "/var/lib/nerdctl/1935db59"
+	ns := "default"
+
+	walker = containerwalker.ContainerWalker{
+		Client: c.client,
+		OnFound: func(ctx context.Context, found containerwalker.Found) error {
+			logJSONFilePath := jsonfile.Path(dataStore, ns, found.Container.ID())
+			if _, err := os.Stat(logJSONFilePath); err != nil {
+				return fmt.Errorf("failed to open %q, container is not created with `nerdctl run -d`?: %w", logJSONFilePath, err)
+			}
+			var reader io.Reader
+			//chan for non-follow tail to check the logsEOF
+			logsEOFChan := make(chan struct{})
+			f, err := os.Open(logJSONFilePath)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			reader = f
+			go func() {
+				<-logsEOFChan
+			}()
+
+			fmt.Fprintln(w, "Got logs from the container:")
+			return jsonfile.Decode(w, w, reader, false, "", "", logsEOFChan)
+		},
+	}
+	n, err = walker.Walk(ctx, containerName)
+	if err != nil {
+		return err
+	} else if n == 0 {
+		return fmt.Errorf("no such container %s", containerName)
+	}
+	return nil
 }
 
 // DeleteContainer will remove a container.
