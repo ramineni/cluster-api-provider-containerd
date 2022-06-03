@@ -23,6 +23,11 @@ import (
 	//"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/namespaces"
 	refdocker "github.com/containerd/containerd/reference/docker"
+	"github.com/containerd/nerdctl/pkg/formatter"
+	"github.com/containerd/nerdctl/pkg/labels"
+	"github.com/containerd/nerdctl/pkg/labels/k8slabels"
+	"github.com/docker/docker/errdefs"
+	"github.com/sirupsen/logrus"
 
 	"sigs.k8s.io/cluster-api/test/infrastructure/container"
 )
@@ -87,7 +92,31 @@ func (c *containerdRuntime) RunContainer(ctx context.Context, runConfig *contain
 }
 
 func (c *containerdRuntime) ListContainers(ctx context.Context, filters container.FilterBuilder) ([]container.Container, error) {
-	return nil, fmt.Errorf("not implemented")
+	containers, err := c.client.Containers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var result []container.Container
+	for _, c := range containers {
+		info, err := c.Info(ctx, containerd.WithoutRefreshedMetadata)
+		if err != nil {
+			if errdefs.IsNotFound(err) {
+				logrus.Warn(err)
+				continue
+			}
+			return nil, err
+		}
+		imageName := info.Image
+		cStatus := formatter.ContainerStatus(ctx, c)
+
+		p := container.Container{
+			Name:   getPrintableContainerName(info.Labels),
+			Image:  imageName,
+			Status: cStatus,
+		}
+		result = append(result, p)
+	}
+	return result, nil
 }
 
 func (c *containerdRuntime) ContainerDebugInfo(ctx context.Context, containerName string, w io.Writer) error {
@@ -100,4 +129,23 @@ func (c *containerdRuntime) DeleteContainer(ctx context.Context, containerName s
 
 func (c *containerdRuntime) KillContainer(ctx context.Context, containerName, signal string) error {
 	return fmt.Errorf("not implemented")
+}
+
+func getPrintableContainerName(containerLabels map[string]string) string {
+	if name, ok := containerLabels[labels.Name]; ok {
+		return name
+	}
+
+	if ns, ok := containerLabels[k8slabels.PodNamespace]; ok {
+		if podName, ok := containerLabels[k8slabels.PodName]; ok {
+			if containerName, ok := containerLabels[k8slabels.ContainerName]; ok {
+				// Container
+				return fmt.Sprintf("k8s://%s/%s/%s", ns, podName, containerName)
+			} else {
+				// Pod sandbox
+				return fmt.Sprintf("k8s://%s/%s", ns, podName)
+			}
+		}
+	}
+	return ""
 }
